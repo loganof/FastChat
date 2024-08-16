@@ -1,36 +1,31 @@
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "fschat"
-version = "0.2.36"
-description = "An open platform for training, serving, and evaluating large language model based chatbots."
+[tool.poetry]
+name = "fastchat"
+version = "0.1.0"
+description = ""
+authors = ["pengzhongchao <pengzhongchao@senseauto.com>"]
 readme = "README.md"
-requires-python = ">=3.8"
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: Apache Software License",
-]
-dependencies = [
-    "aiohttp", "fastapi", "httpx", "markdown2[all]", "nh3", "numpy",
-    "prompt_toolkit>=3.0.0", "pydantic<3,>=2.0.0", "pydantic-settings", "psutil", "requests", "rich>=10.0.0",
-    "shortuuid", "tiktoken", "uvicorn",
-]
 
-[project.optional-dependencies]
-model_worker = ["accelerate>=0.21", "peft", "sentencepiece", "torch", "transformers>=4.31.0", "protobuf"]
-webui = ["gradio>=4.10"]
-train = ["einops", "flash-attn>=2.0", "wandb"]
-llm_judge = ["openai<1", "anthropic>=0.3", "ray"]
-dev = ["black==23.3.0", "pylint==2.8.2"]
+[tool.poetry.dependencies]
+python = "^3.10"
+fastapi = "^0.112.1"
+requests = "^2.32.3"
+uvicorn = "^0.30.6"
+torch = "^2.4.0"
+transformers = "^4.44.0"
+accelerate = "^0.33.0"
+markdown2 = "^2.5.0"
+nh3 = "^0.2.18"
+sentencepiece = "^0.2.0"
+safetensors = "^0.4.4"
+pydantic = "^2.8.2"
+aiohttp = "^3.10.3"
+pydantic-settings = "^2.4.0"
+shortuuid = "^1.0.13"
+tiktoken = "^0.7.0"
+prompt-toolkit = "^3.0.47"
+protobuf = "^5.27.3"
 
-[project.urls]
-"Homepage" = "https://github.com/lm-sys/fastchat"
-"Bug Tracker" = "https://github.com/lm-sys/fastchat/issues"
 
-[tool.setuptools.packages.find]
-exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
-
-[tool.wheel]
-exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

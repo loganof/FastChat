@@ -114,6 +114,7 @@ class BaseModelAdapter:
                 model_path,
                 low_cpu_mem_usage=True,
                 trust_remote_code=True,
+                offload_folder="offload",
                 **from_pretrained_kwargs,
             )
         except NameError:
@@ -233,9 +234,9 @@ def load_model(
         if num_gpus != 1:
             kwargs["device_map"] = "auto"
             if max_gpu_memory is None:
-                kwargs[
-                    "device_map"
-                ] = "sequential"  # This is important for not the same VRAM sizes
+                kwargs["device_map"] = (
+                    "sequential"  # This is important for not the same VRAM sizes
+                )
                 available_gpu_memory = get_gpu_memory(num_gpus)
                 kwargs["max_memory"] = {
                     i: str(int(available_gpu_memory[i] * 0.85)) + "GiB"
