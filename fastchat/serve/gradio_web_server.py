@@ -92,6 +92,68 @@ We thank [UC Berkeley SkyLab](https://sky.cs.berkeley.edu/), [Kaggle](https://ww
 </div>
 """
 
+default_prompt = """输入一段用户和AI助手对话，你需要从用户的对话中获得用户意图，并且提取出关键信息，而对于AI的回答则不需要提取。对话的意图以及对应的关键信息如下：
+        train_ticket_tool: 此意图为当用户询问关于查询火车票或订火车票相关的问题时，它会给予正确的回复。例如询问“我想看看后天到上海的火车票”，“12月1日北京到上海的火车票”等
+        train_ticket_tool的关键信息如下所示：
+            出发地（departure)
+            目的地 (destination)
+            出发日期（date)
+            车票类型 (type, 车次号或者对火车票的描述))
+            乘客姓名(name)
+            手机号(phone)
+            身份证号(ID_card)
+            你需要检查出发日期, 如果用户提供的日期比较模糊(比如周末、暑假、春运、**期间), 无法转换成具体的某一天，则不输出日期;如果可以转换成具体的某一天,则输出原始表述
+        例如：
+            “Human：我想查询一下下周四的火车票情况。
+            AI：请提供您的出发城市和目的地。
+            Human：从广州出发，目的地是北京。
+            AI：正在为您查询下周四从广州到北京的火车票，请稍候。
+            Human： 好的。
+            AI：查询到有7个火车票信息，请问你有什么偏好吗？
+            Human：高铁票二等座。
+            AI：好的，请提供您的姓名和身份证号。
+            Human：章三， 123456789876543210。
+            AI：确认一下，您要预定下周四从广州到北京的高铁二等座，对吗？
+            Human：是的，确认预定。“
+        需要返回的是{'target': 'train_ticket_tool', departure': '广州', 'destination': '北京', 'date': '下周四', 'type': '高铁二等座', 'name': '章三', 'ID_card': '123456789876543210'}
+    weather_query_tool: 此意图为当用户询问关于查询天气的问题时，它会给予正确的回复。例如询问“今天天气怎么样”，“今天多少度”等
+    weather_query_tool的关键信息如下：
+        地点(location)
+        日期(date)
+        你需要检查日期, 如果用户提供的日期比较模糊(比如周末、暑假、春运、**期间), 无法转换成具体的某一天，则不输出日期;如果可以转换成具体的某一天,则输出原始表述
+    例如：
+           “Human：我想查询一下下周四的天气情况。
+            AI：好的,您想查询哪里的天气呢。
+            Human：北京。“
+        你需要输出：
+            {'target': 'weather_query_tool', 'location': '北京', 'date': '下周四'}
+    airline_ticket_tool: 此模块为当用户询问关于查询机票或订机票相关的问题时，它会给予正确的回复。例如询问“我想看看后天到上海的机票”，“12月1日北京到上海的机票”等
+    airline_ticket_tool的关键信息如下：
+            出发地（departure)
+            目的地 (destination)
+            出发日期（date)
+            机票类型 (type, 航班号或者对机票的描述))
+            乘客姓名(name)
+            手机号(phone)
+            身份证号(ID_card)。
+        你需要检查出发日期, 如果用户提供的日期比较模糊(比如周末、暑假、春运、**期间), 无法转换成具体的某一天，则不输出日期;如果可以转换成具体的某一天,则输出原始表述。
+    例如：
+            Human：我想查询一下下周四的航班情况。
+            AI：请提供您的出发城市和目的地。
+            Human：从广州出发，目的地是北京。
+            AI：正在为您查询下周四从广州到北京的机票，请稍候。
+            Human： 好的。
+            AI：查询到有7个航班信息，请问你有什么偏好吗？
+            Human：最便宜的那一班吧。
+            AI：好的，请提供您的姓名和身份证号。
+            Human：章三， 123456789876543210。
+            AI：确认一下，您要预定下周四从广州到北京的最便宜的航班，对吗？
+            Human：是的，确认预定。“
+        你需要输出：
+            {'target': 'airline_ticket_tool', 'departure': '广州', 'destination': '北京', 'date': '下周四', 'type': '最便宜', 'name': '章三', 'ID_card': '123456789876543210'}
+        \n下面我给你一段对话，按照上面的要求，对这段对话提取出关键信息，对于AI的回答不需要提取, 没有出现的槽值不需要输出。以字典格式直接输出结果, 不需要输出说明。对话如下：
+    """
+
 # JSON file format of API-based models:
 # {
 #   "gpt-3.5-turbo": {
@@ -311,7 +373,7 @@ def get_ip(request: gr.Request):
     return ip
 
 
-def add_text(state, model_selector, text, request: gr.Request):
+def add_text(state, model_selector, text, prompt, request: gr.Request):
     ip = get_ip(request)
     logger.info(f"add_text. ip: {ip}. len: {len(text)}")
 
@@ -321,7 +383,8 @@ def add_text(state, model_selector, text, request: gr.Request):
     if len(text) <= 0:
         state.skip_next = True
         return (state, state.to_gradio_chatbot(), "", None) + (no_change_btn,) * 5
-
+    state.conv.set_system_message(prompt)
+    print(f"######{state.conv.get_system_message()}")
     all_conv_text = state.conv.get_prompt()
     all_conv_text = all_conv_text[-2000:] + "\nuser: " + text
     flagged = moderation_filter(all_conv_text, [state.model_name])
@@ -466,7 +529,7 @@ def bot_response(
         if "t5" in model_name:
             repetition_penalty = 1.2
         else:
-            repetition_penalty = 1.0
+            repetition_penalty = 1.5
 
         stream_iter = model_worker_stream_iter(
             conv,
@@ -560,7 +623,7 @@ def bot_response(
         return
 
     finish_tstamp = time.time()
-    logger.info(f"{output}")
+    logger.info(f"{output=}")
 
     conv.save_new_images(
         has_csam_images=state.has_csam_image, use_remote_storage=use_remote_storage
@@ -824,7 +887,6 @@ def build_single_model_ui(models, add_promotion_links=False):
 # 🏔️ Chat with Large Language Models
 {promotion}
 """
-
     state = gr.State()
     gr.Markdown(notice_markdown, elem_id="notice_markdown")
 
@@ -844,13 +906,22 @@ def build_single_model_ui(models, add_promotion_links=False):
             ):
                 model_description_md = get_model_description_md(models)
                 gr.Markdown(model_description_md, elem_id="model_description_markdown")
+        with gr.Row():
+            with gr.Column(scale=2):
+                chatbot = gr.Chatbot(
+                    elem_id="chatbot",
+                    label="Scroll down and start chatting",
+                    height=650,
+                    show_copy_button=True,
+                )
+            with gr.Column(scale=1):
+                custom_prompt = gr.Textbox(
+                    label="自定义提示词",
+                    value=default_prompt,
+                    # lines=650
+                )
+                # update_prompt_btn = gr.Button(value="update prompt", variant="primary")
 
-        chatbot = gr.Chatbot(
-            elem_id="chatbot",
-            label="Scroll down and start chatting",
-            height=650,
-            show_copy_button=True,
-        )
     with gr.Row():
         textbox = gr.Textbox(
             show_label=False,
@@ -923,7 +994,7 @@ def build_single_model_ui(models, add_promotion_links=False):
 
     textbox.submit(
         add_text,
-        [state, model_selector, textbox],
+        [state, model_selector, textbox, custom_prompt],
         [state, chatbot, textbox] + btn_list,
     ).then(
         bot_response,
@@ -932,13 +1003,19 @@ def build_single_model_ui(models, add_promotion_links=False):
     )
     send_btn.click(
         add_text,
-        [state, model_selector, textbox],
+        [state, model_selector, textbox, custom_prompt],
         [state, chatbot, textbox] + btn_list,
     ).then(
         bot_response,
         [state, temperature, top_p, max_output_tokens],
         [state, chatbot] + btn_list,
     )
+
+    # def refresh_prompt(state, prompt):
+    #     if state is not None:
+    #         state.conv.set_system_message(prompt)
+
+    # update_prompt_btn.click(refresh_prompt, [state, custom_prompt], [])
 
     return [state, model_selector]
 

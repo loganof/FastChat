@@ -7,6 +7,7 @@ See documentations at docs/vllm_integration.md
 import argparse
 import asyncio
 import json
+import os
 from typing import List
 
 from fastapi import FastAPI, Request, BackgroundTasks
@@ -156,9 +157,11 @@ class VLLMWorker(BaseModelWorker):
                 "cumulative_logprob": [
                     output.cumulative_logprob for output in request_output.outputs
                 ],
-                "finish_reason": request_output.outputs[0].finish_reason
-                if len(request_output.outputs) == 1
-                else [output.finish_reason for output in request_output.outputs],
+                "finish_reason": (
+                    request_output.outputs[0].finish_reason
+                    if len(request_output.outputs) == 1
+                    else [output.finish_reason for output in request_output.outputs]
+                ),
             }
             # Emit twice here to ensure a 'finish_reason' with empty content in the OpenAI API response.
             # This aligns with the behavior of model_worker.
@@ -198,6 +201,8 @@ def create_background_tasks(request_id):
 @app.post("/worker_generate_stream")
 async def api_generate_stream(request: Request):
     params = await request.json()
+    print(f"### vllm receive: {params}")
+
     await acquire_worker_semaphore()
     request_id = random_uuid()
     params["request_id"] = request_id
@@ -259,6 +264,12 @@ if __name__ == "__main__":
     parser.add_argument("--no-register", action="store_true")
     parser.add_argument("--num-gpus", type=int, default=1)
     parser.add_argument(
+        "--gpus",
+        type=str,
+        default=None,
+        help="A single GPU like 1 or multiple GPUs like 0,2",
+    )
+    parser.add_argument(
         "--conv-template", type=str, default=None, help="Conversation prompt template."
     )
     parser.add_argument(
@@ -285,6 +296,13 @@ if __name__ == "__main__":
         args.model = args.model_path
     if args.num_gpus > 1:
         args.tensor_parallel_size = args.num_gpus
+
+    if args.gpus:
+        if len(args.gpus.split(",")) < args.num_gpus:
+            raise ValueError(
+                f"Larger --num-gpus ({args.num_gpus}) than --gpus {args.gpus}!"
+            )
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)

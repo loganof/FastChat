@@ -26,7 +26,8 @@ from fastchat.serve.model_worker import (
 
 from lightllm.server.sampling_params import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.server.httpserver.manager import HttpServerManager
+from lightllm.server.httpserver.manager import HttpServerManager, MetricClient
+from lightllm.server.metrics.manager import start_metric_manager
 from lightllm.server.detokenization.manager import start_detokenization_process
 from lightllm.server.router.manager import start_router_process
 from lightllm.server.req_id_generator import ReqIDGenerator
@@ -131,14 +132,20 @@ class LightLLMWorker(BaseModelWorker):
         sampling_params.verify()
 
         results_generator = httpserver_manager.generate(
-            prompt, sampling_params, request_id, MultimodalParams()
+            prompt, sampling_params, request_id, MultimodalParams(), request=request
         )
 
         completion_tokens = 0
         text_outputs = ""
         cumulative_logprob = 0.0
-
-        async for request_output, metadata, finish_status in results_generator:
+        logger.info(f"### start request")
+        async for (
+            sub_req_id,
+            request_output,
+            metadata,
+            finish_status,
+        ) in results_generator:
+            logger.info(f"### {request_output=}")
             text_outputs += request_output
             completion_tokens += 1
 
@@ -214,6 +221,7 @@ def create_background_tasks(request_id):
 @app.post("/worker_generate_stream")
 async def api_generate_stream(request: Request):
     params = await request.json()
+    print(f"### lightllm receive: {params}")
     await acquire_worker_semaphore()
     request_id = g_id_gen.generate_id()
     params["request_id"] = request_id
@@ -257,46 +265,30 @@ async def api_model_details(request: Request):
     return {"context_length": worker.context_len}
 
 
-if __name__ == "__main__":
-    torch.multiprocessing.set_start_method("spawn")
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+def make_argument_parser(parser) -> argparse.ArgumentParser:
+    parser.add_argument("--host", type=str, default="localhost")
+    parser.add_argument("--port", type=int, default=21002)
 
     parser.add_argument(
-        "--model-path",
-        dest="model_dir",
+        "--model_dir",
         type=str,
         default=None,
         help="the model weight dir path, the app will load config, weights and tokenizer from this dir",
     )
-    parser.add_argument("--worker-address", type=str, default="http://localhost:21002")
-    parser.add_argument(
-        "--controller-address", type=str, default="http://localhost:21001"
-    )
-    parser.add_argument(
-        "--conv-template", type=str, default=None, help="Conversation prompt template."
-    )
-    parser.add_argument(
-        "--model-names",
-        type=lambda s: s.split(","),
-        help="Optional display comma separated names",
-    )
-    parser.add_argument("--limit-worker-concurrency", type=int, default=1024)
-    parser.add_argument("--no-register", action="store_true")
-
     parser.add_argument(
         "--tokenizer_mode",
         type=str,
         default="slow",
-        help="""tokenizer load mode, can be slow or auto, slow mode load fast but run slow, slow mode is good for debug and test,
-                        when you want to get best performance, try auto mode""",
+        help="""tokenizer load mode, can be slow, fast or auto, slow mode load fast but run slow,
+          slow mode is good for debug and test, fast mode get best performance, auto mode will
+          try to use fast mode, if failed will use slow mode""",
     )
     parser.add_argument(
         "--load_way",
         type=str,
         default="HF",
-        help="the way of loading model weights, the default is HF(Huggingface format), llama also supports DS(Deepspeed)",
+        help="""the way of loading model weights, the default is HF(Huggingface format), llama also supports
+          DS(Deepspeed)""",
     )
     parser.add_argument(
         "--max_total_token_num",
@@ -310,7 +302,9 @@ if __name__ == "__main__":
         default=None,
         help="max tokens num for new cat batch, it control prefill batch size to Preventing OOM",
     )
-    parser.add_argument("--eos_id", type=int, default=2, help="eos stop token id")
+    parser.add_argument(
+        "--eos_id", nargs="+", type=int, default=[2], help="eos stop token id"
+    )
     parser.add_argument(
         "--running_max_req_size",
         type=int,
@@ -323,14 +317,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_req_input_len",
         type=int,
-        default=None,
-        help="the max value for req input tokens num. If None, it will be derived from the config.",
+        default=2048,
+        help="the max value for req input tokens num",
     )
     parser.add_argument(
         "--max_req_total_len",
         type=int,
-        default=None,
-        help="the max value for req_input_len + req_output_len. If None, it will be derived from the config.",
+        default=2048 + 1024,
+        help="the max value for req_input_len + req_output_len",
+    )
+    parser.add_argument(
+        "--nccl_port",
+        type=int,
+        default=28765,
+        help="the nccl_port to build a distributed environment for PyTorch",
     )
     parser.add_argument(
         "--mode",
@@ -338,14 +338,16 @@ if __name__ == "__main__":
         default=[],
         nargs="+",
         help="""Model mode: [triton_int8kv | ppl_int8kv | ppl_fp16 | triton_flashdecoding
-                        | triton_gqa_attention | triton_gqa_flashdecoding]
-                        [triton_int8weight | triton_int4weight | lmdeploy_int4weight | ppl_int4weight],
+                        | triton_gqa_attention | triton_gqa_flashdecoding
+                        | triton_w4a16 | triton_w8a16 | triton_w8a8 | lmdeploy_w4a16
+                        | ppl_w4a16 | ppl_w8a8 | ppl_w8a8_mixdown],
                         triton_flashdecoding mode is for long context, current support llama llama2 qwen;
                         triton_gqa_attention and triton_gqa_flashdecoding is fast kernel for model which use GQA;
                         triton_int8kv mode use int8 to store kv cache, can increase token capacity, use triton kernel;
                         ppl_int8kv mode use int8 to store kv cache, and use ppl fast kernel;
                         ppl_fp16 mode use ppl fast fp16 decode attention kernel;
-                        triton_int8weight and triton_int4weight and lmdeploy_int4weight or ppl_int4weight mode use int8 and int4 to store weights;
+                        triton_int8weight and triton_int4weight and lmdeploy_int4weight or ppl_int4weight mode
+                        use int8 and int4 to store weights;
                         you need to read source code to make sure the supported detail mode for all models""",
     )
     parser.add_argument(
@@ -379,28 +381,37 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--no_skipping_special_tokens",
-        action="store_true",
-        help="whether to skip special tokens when decoding",
+        "--router_max_wait_tokens",
+        type=int,
+        default=10,
+        help="schedule new requests after every router_max_wait_tokens decode steps.",
     )
+
     parser.add_argument(
-        "--no_spaces_between_special_tokens",
+        "--use_dynamic_prompt_cache",
         action="store_true",
-        help="whether to add spaces between special tokens when decoding",
+        help="use_dynamic_prompt_cache test",
+    )
+
+    parser.add_argument(
+        "--splitfuse_block_size", type=int, default=256, help="splitfuse block size"
     )
 
     parser.add_argument(
         "--splitfuse_mode", action="store_true", help="use splitfuse mode"
     )
+    parser.add_argument("--beam_mode", action="store_true", help="use beamsearch mode")
     parser.add_argument(
-        "--splitfuse_block_size", type=int, default=256, help="splitfuse block size"
+        "--diverse_mode", action="store_true", help="diversity generation mode"
     )
     parser.add_argument(
-        "--prompt_cache_strs",
-        type=str,
-        default=[],
-        nargs="+",
-        help="""prompt cache strs""",
+        "--token_healing_mode", action="store_true", help="code model infer mode"
+    )
+
+    parser.add_argument(
+        "--enable_multimodal",
+        action="store_true",
+        help="Whether or not to allow to load additional multimodal models.",
     )
     parser.add_argument(
         "--cache_capacity",
@@ -415,10 +426,22 @@ if __name__ == "__main__":
         help="cache server reserved capacity ratio after clear",
     )
     parser.add_argument(
+        "--data_type",
+        type=str,
+        choices=["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"],
+        default="float16",
+        help="the data type of the model weight",
+    )
+    parser.add_argument(
         "--return_all_prompt_logprobs",
         action="store_true",
         help="return all prompt tokens logprobs",
     )
+
+    parser.add_argument(
+        "--use_reward_model", action="store_true", help="use reward model"
+    )
+
     parser.add_argument(
         "--long_truncation_mode",
         type=str,
@@ -429,12 +452,94 @@ if __name__ == "__main__":
                         head : remove some head tokens to make input token len <= max_req_input_len
                         center : remove some tokens in center loc to make input token len <= max_req_input_len""",
     )
+    parser.add_argument(
+        "--use_tgi_api", action="store_true", help="use tgi input and ouput format"
+    )
+    parser.add_argument(
+        "--health_monitor",
+        action="store_true",
+        help="check the health of service and restart when error",
+    )
+    parser.add_argument(
+        "--metric_gateway",
+        type=str,
+        default=None,
+        help="address for collecting monitoring metrics",
+    )
+    parser.add_argument(
+        "--job_name", type=str, default="lightllm", help="job name for monitor"
+    )
+    parser.add_argument(
+        "--grouping_key",
+        action="append",
+        default=[],
+        help="grouping_key for the monitor in the form key=value",
+    )
+    parser.add_argument(
+        "--push_interval",
+        type=int,
+        default=10,
+        help="interval of pushing monitoring metrics",
+    )
+    parser.add_argument(
+        "--enable_monitor_auth",
+        action="store_true",
+        help="Whether to open authentication for push_gateway",
+    )
 
+    return parser
+
+
+if __name__ == "__main__":
+    torch.multiprocessing.set_start_method("spawn")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model-path",
+        dest="model_dir",
+        type=str,
+        default=None,
+        help="the model weight dir path, the app will load config, weights and tokenizer from this dir",
+    )
+    parser.add_argument("--worker-address", type=str, default="http://localhost:21002")
+    parser.add_argument(
+        "--controller-address", type=str, default="http://localhost:21001"
+    )
+    parser.add_argument(
+        "--conv-template", type=str, default=None, help="Conversation prompt template."
+    )
+    parser.add_argument(
+        "--model-names",
+        type=lambda s: s.split(","),
+        help="Optional display comma separated names",
+    )
+    parser.add_argument("--limit-worker-concurrency", type=int, default=1024)
+    parser.add_argument("--no-register", action="store_true")
+    parser.add_argument(
+        "--prompt_cache_strs",
+        type=str,
+        default=[],
+        nargs="+",
+        help="""prompt cache strs""",
+    )
+    parser.add_argument("--num-gpus", type=int, default=1)
+    parser.add_argument(
+        "--gpus",
+        type=str,
+        default=None,
+        help="A single GPU like 1 or multiple GPUs like 0,2",
+    )
+    parser = make_argument_parser(parser)
     args = parser.parse_args()
+    if args.gpus:
+        if len(args.gpus.split(",")) < args.num_gpus:
+            raise ValueError(
+                f"Larger --num-gpus ({args.num_gpus}) than --gpus {args.gpus}!"
+            )
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
 
     # 非splitfuse 模式，不支持 prompt cache 特性
-    if not args.splitfuse_mode:
-        assert len(args.prompt_cache_strs) == 0
+    # if not args.splitfuse_mode:
+    #     assert len(args.prompt_cache_strs) == 0
 
     model_config = AutoConfig.from_pretrained(args.model_dir)
     context_length = get_context_length(model_config)
@@ -446,6 +551,22 @@ if __name__ == "__main__":
 
     assert args.max_req_input_len < args.max_req_total_len
     assert args.max_req_total_len <= args.max_total_token_num
+
+    # 这些模式不能同时设置。
+    assert [
+        args.splitfuse_mode,
+        args.beam_mode,
+        args.diverse_mode,
+        args.token_healing_mode,
+    ].count(True) <= 1
+    # 部分模式目前还无法与dynamic_prompt_cache一起跑，to do。
+    if args.use_dynamic_prompt_cache:
+        assert args.beam_mode is False
+        assert args.token_healing_mode is False
+
+    # 部分模式还不能支持与高级动态调度算法协同，to do.
+    if args.beam_mode or args.diverse_mode:
+        assert args.router_token_ratio == 0.0
 
     if not args.splitfuse_mode:
         # 普通模式下
@@ -465,7 +586,10 @@ if __name__ == "__main__":
             batch_max_tokens = max(batch_max_tokens, args.splitfuse_block_size)
             args.batch_max_tokens = batch_max_tokens
 
-    can_use_ports = alloc_can_use_network_port(num=6 + args.tp)
+    # can_use_ports = alloc_can_use_network_port(num=6 + args.tp)
+    can_use_ports = alloc_can_use_network_port(
+        num=6 + args.tp, used_nccl_port=args.nccl_port
+    )
 
     assert can_use_ports is not None, "Can not alloc enough free ports."
     (
@@ -474,10 +598,21 @@ if __name__ == "__main__":
         httpserver_port,
         visual_port,
         cache_port,
-        nccl_port,
+        metric_port,
     ) = can_use_ports[0:6]
-    args.nccl_port = nccl_port
+    # args.nccl_port = nccl_port
     model_rpc_ports = can_use_ports[6:]
+
+    start_submodule_processes(
+        start_funcs=[
+            start_metric_manager,
+        ],
+        start_args=[(metric_port, args)],
+    )
+
+    global metric_client
+    print(f"###{metric_port=}")
+    metric_client = MetricClient(metric_port)
 
     global httpserver_manager
     httpserver_manager = HttpServerManager(
@@ -487,12 +622,13 @@ if __name__ == "__main__":
         visual_port=visual_port,
         httpserver_port=httpserver_port,
         enable_multimodal=False,
+        metric_port=metric_port,
     )
 
     start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
         start_args=[
-            (args, router_port, detokenization_port, model_rpc_ports),
+            (args, router_port, detokenization_port, model_rpc_ports, metric_port),
             (args, detokenization_port, httpserver_port),
         ],
     )
