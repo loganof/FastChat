@@ -21,13 +21,15 @@ from vllm.utils import random_uuid
 
 from fastchat.serve.base_model_worker import BaseModelWorker
 from fastchat.serve.model_worker import (
-    logger,
+    # logger,
     worker_id,
 )
+from fastchat.logger import logger
 from fastchat.utils import get_context_length, is_partial_stop
 
 
 app = FastAPI()
+request_num = 0
 
 
 class VLLMWorker(BaseModelWorker):
@@ -67,8 +69,6 @@ class VLLMWorker(BaseModelWorker):
             self.init_heart_beat()
 
     async def generate_stream(self, params):
-        self.call_ct += 1
-
         context = params.pop("prompt")
         request_id = params.pop("request_id")
         temperature = float(params.get("temperature", 1.0))
@@ -119,16 +119,21 @@ class VLLMWorker(BaseModelWorker):
             best_of=best_of,
         )
         results_generator = engine.generate(context, sampling_params, request_id)
-        logger.info(f"request to vLLM")
         start_time = time.time()
         first_token_received = False
         async for request_output in results_generator:
             if not first_token_received:
-                # 计算首字延迟
-                first_token_latency = time.time() - start_time
-                logger.info(
-                    f"vLLM First token latency: {first_token_latency:.4f} seconds"
+                # 计算平均首字延迟
+                self.call_ct += 1
+                current_latency = time.time() - start_time
+                total_latency = (
+                    self.first_token_latency * (self.call_ct - 1) + current_latency
                 )
+                self.first_token_latency = round(total_latency / self.call_ct, 4)
+                with logger.contextualize(request_id=request_id):
+                    logger.info(
+                        f"vLLM First token latency(Avg): {self.first_token_latency} seconds, current_latency: {current_latency}, request count: {self.call_ct}"
+                    )
                 first_token_received = True
             prompt = request_output.prompt
             if echo:
@@ -211,15 +216,15 @@ def create_background_tasks(request_id):
 @app.post("/worker_generate_stream")
 async def api_generate_stream(request: Request):
     params = await request.json()
-    print(f"### vllm receive: {params}")
-
     await acquire_worker_semaphore()
     request_id = random_uuid()
-    params["request_id"] = request_id
-    params["request"] = request
-    generator = worker.generate_stream(params)
-    background_tasks = create_background_tasks(request_id)
-    return StreamingResponse(generator, background=background_tasks)
+    with logger.contextualize(request_id=request_id):
+        params["request_id"] = request_id
+        params["request"] = request
+        logger.info(f"vllm receive: {params}")
+        generator = worker.generate_stream(params)
+        background_tasks = create_background_tasks(request_id)
+        return StreamingResponse(generator, background=background_tasks)
 
 
 @app.post("/worker_generate")

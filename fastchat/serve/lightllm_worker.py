@@ -25,6 +25,8 @@ from fastchat.serve.model_worker import (
     worker_id,
 )
 
+# from fastchat.logger import logger todo:can't support context
+
 from lightllm.server.sampling_params import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.server.httpserver.manager import HttpServerManager, MetricClient
@@ -77,8 +79,6 @@ class LightLLMWorker(BaseModelWorker):
             self.init_heart_beat()
 
     async def generate_stream(self, params):
-        self.call_ct += 1
-
         prompt = params.pop("prompt")
         request_id = params.pop("request_id")
         temperature = float(params.get("temperature", 1.0))
@@ -139,7 +139,6 @@ class LightLLMWorker(BaseModelWorker):
         completion_tokens = 0
         text_outputs = ""
         cumulative_logprob = 0.0
-        logger.info(f"request to lightLLM")
         start_time = time.time()
         first_token_received = False
         async for (
@@ -150,9 +149,15 @@ class LightLLMWorker(BaseModelWorker):
         ) in results_generator:
             if not first_token_received:
                 # 计算首字延迟
-                first_token_latency = time.time() - start_time
+                self.call_ct += 1
+                current_latency = time.time() - start_time
+                total_latency = (
+                    self.first_token_latency * (self.call_ct - 1) + current_latency
+                )
+                self.first_token_latency = round(total_latency / self.call_ct, 4)
+                # with logger.contextualize(request_id=request_id):
                 logger.info(
-                    f"lightLLM First token latency: {first_token_latency:.4f} seconds"
+                    f"lightLLM First token latency(Avg): {self.first_token_latency} seconds, current_latency: {current_latency}, request count: {self.call_ct}"
                 )
                 first_token_received = True
             text_outputs += request_output
@@ -230,7 +235,6 @@ def create_background_tasks(request_id):
 @app.post("/worker_generate_stream")
 async def api_generate_stream(request: Request):
     params = await request.json()
-    print(f"### lightllm receive: {params}")
     await acquire_worker_semaphore()
     request_id = g_id_gen.generate_id()
     params["request_id"] = request_id
@@ -620,7 +624,6 @@ if __name__ == "__main__":
     )
 
     global metric_client
-    print(f"###{metric_port=}")
     metric_client = MetricClient(metric_port)
 
     global httpserver_manager

@@ -51,6 +51,7 @@ class BaseModelWorker:
         self.tokenizer = None
         self.context_len = None
         self.call_ct = 0
+        self.first_token_latency = 0
         self.semaphore = None
 
         self.heart_beat_thread = None

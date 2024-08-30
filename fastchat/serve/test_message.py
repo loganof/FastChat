@@ -1,4 +1,5 @@
 """Send a test message."""
+
 import argparse
 import json
 
@@ -31,6 +32,9 @@ def main():
         return
 
     conv = get_conversation_template(model_name)
+    from fastchat.prompt.custom_prompt import intent_slot_prompt
+
+    conv.set_system_message(intent_slot_prompt)
     conv.append_message(conv.roles[0], args.message)
     conv.append_message(conv.roles[1], None)
     prompt = conv.get_prompt()
@@ -43,7 +47,7 @@ def main():
         "max_new_tokens": args.max_new_tokens,
         "stop": conv.stop_str,
         "stop_token_ids": conv.stop_token_ids,
-        "echo": False,
+        # "echo": False,# close token count
     }
     response = requests.post(
         worker_addr + "/worker_generate_stream",
@@ -73,9 +77,8 @@ if __name__ == "__main__":
     parser.add_argument("--model-name", type=str, required=True)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-new-tokens", type=int, default=32)
-    parser.add_argument(
-        "--message", type=str, default="Tell me a story with more than 1000 words."
-    )
+    parser.add_argument("--message", type=str, default="订一张明天去深圳的机票")
     args = parser.parse_args()
 
-    main()
+    while True:
+        main()

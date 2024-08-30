@@ -1,4 +1,5 @@
 """Benchmarking script to test the throughput of serving workers."""
+
 import argparse
 import json
 
@@ -30,10 +31,12 @@ def main():
         return
 
     conv = get_conv_template("vicuna_v1.1")
-    conv.append_message(conv.roles[0], "Tell me a story with more than 1000 words")
+    from fastchat.prompt.custom_prompt import intent_slot_prompt
+
+    conv.set_system_message(intent_slot_prompt)
+    conv.append_message(conv.roles[0], "订一张明天去深圳的机票")
     prompt_template = conv.get_prompt()
     prompts = [prompt_template for _ in range(args.n_thread)]
-
     headers = {"User-Agent": "fastchat Client"}
     ploads = [
         {
@@ -111,5 +114,5 @@ if __name__ == "__main__":
     parser.add_argument("--n-thread", type=int, default=8)
     parser.add_argument("--test-dispatch", action="store_true")
     args = parser.parse_args()
-
-    main()
+    for i in range(20):
+        main()
