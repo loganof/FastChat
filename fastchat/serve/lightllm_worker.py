@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import json
 import os
+import time
 import torch
 import uvicorn
 
@@ -138,14 +139,22 @@ class LightLLMWorker(BaseModelWorker):
         completion_tokens = 0
         text_outputs = ""
         cumulative_logprob = 0.0
-        logger.info(f"### start request")
+        logger.info(f"request to lightLLM")
+        start_time = time.time()
+        first_token_received = False
         async for (
             sub_req_id,
             request_output,
             metadata,
             finish_status,
         ) in results_generator:
-            logger.info(f"### {request_output=}")
+            if not first_token_received:
+                # 计算首字延迟
+                first_token_latency = time.time() - start_time
+                logger.info(
+                    f"lightLLM First token latency: {first_token_latency:.4f} seconds"
+                )
+                first_token_received = True
             text_outputs += request_output
             completion_tokens += 1
 

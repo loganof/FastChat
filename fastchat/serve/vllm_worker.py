@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import json
 import os
+import time
 from typing import List
 
 from fastapi import FastAPI, Request, BackgroundTasks
@@ -118,8 +119,17 @@ class VLLMWorker(BaseModelWorker):
             best_of=best_of,
         )
         results_generator = engine.generate(context, sampling_params, request_id)
-
+        logger.info(f"request to vLLM")
+        start_time = time.time()
+        first_token_received = False
         async for request_output in results_generator:
+            if not first_token_received:
+                # 计算首字延迟
+                first_token_latency = time.time() - start_time
+                logger.info(
+                    f"vLLM First token latency: {first_token_latency:.4f} seconds"
+                )
+                first_token_received = True
             prompt = request_output.prompt
             if echo:
                 text_outputs = [

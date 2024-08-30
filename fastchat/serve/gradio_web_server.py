@@ -929,6 +929,12 @@ def build_single_model_ui(models, add_promotion_links=False):
             elem_id="input_box",
         )
         send_btn = gr.Button(value="Send", variant="primary", scale=0)
+        test_btn = gr.Button(value="Test", variant="primary", scale=0)
+        tb_times = gr.Textbox(
+            show_label=False,
+            placeholder="cycles",
+            value=10,
+        )
 
     with gr.Row() as button_row:
         upvote_btn = gr.Button(value="👍  Upvote", interactive=False)
@@ -1011,11 +1017,20 @@ def build_single_model_ui(models, add_promotion_links=False):
         [state, chatbot] + btn_list,
     )
 
-    # def refresh_prompt(state, prompt):
-    #     if state is not None:
-    #         state.conv.set_system_message(prompt)
+    def batch_test(times):
+        cycles = int(times)
+        for i in range(cycles):
+            textbox.submit(
+                add_text,
+                [state, model_selector, textbox, custom_prompt],
+                [state, chatbot, textbox] + btn_list,
+            ).then(
+                bot_response,
+                [state, temperature, top_p, max_output_tokens],
+                [state, chatbot] + btn_list,
+            )
 
-    # update_prompt_btn.click(refresh_prompt, [state, custom_prompt], [])
+    test_btn.click(batch_test, [tb_times])
 
     return [state, model_selector]
 

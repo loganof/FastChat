@@ -26,6 +26,10 @@ protobuf = "^5.27.3"
 vllm = "^0.5.4"
 uvicorn = "0.19.0"
 plotly = "^5.23.0"
+sortedcontainers = "^2.4.0"
+tomlkit = "^0.13.2"
+more-itertools = "^10.4.0"
+platformdirs = "^4.2.2"
 
 
 [build-system]
