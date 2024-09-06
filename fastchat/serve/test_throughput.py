@@ -30,11 +30,11 @@ def main():
     if worker_addr == "":
         return
 
-    conv = get_conv_template("vicuna_v1.1")
+    conv = get_conv_template("qwen-7b-chat")
     from fastchat.prompt.custom_prompt import intent_slot_prompt
 
     conv.set_system_message(intent_slot_prompt)
-    conv.append_message(conv.roles[0], "订一张明天去深圳的机票")
+    conv.append_message(conv.roles[0], "查询明天的天气")
     prompt_template = conv.get_prompt()
     prompts = [prompt_template for _ in range(args.n_thread)]
     headers = {"User-Agent": "fastchat Client"}
@@ -43,8 +43,9 @@ def main():
             "model": args.model_name,
             "prompt": prompts[i],
             "max_new_tokens": args.max_new_tokens,
-            "temperature": 0.0,
+            "temperature": 0.7,
             # "stop": conv.sep,
+            # "echo": False
         }
         for i in range(len(prompts))
     ]
@@ -62,16 +63,34 @@ def main():
             thread_worker_addr + "/worker_generate_stream",
             headers=headers,
             json=ploads[i],
-            stream=False,
+            stream=True,
         )
-        k = list(
-            response.iter_lines(chunk_size=8192, decode_unicode=False, delimiter=b"\0")
-        )
-        # print(k)
-        response_new_words = json.loads(k[-2].decode("utf-8"))["text"]
-        error_code = json.loads(k[-2].decode("utf-8"))["error_code"]
+        # k = list(
+        #     response.iter_lines(chunk_size=8192, decode_unicode=False, delimiter=b"\0")
+        # )
+        # response_new_words = json.loads(k[-2].decode("utf-8"))["text"]
+        # error_code = json.loads(k[-2].decode("utf-8"))["error_code"]
         # print(f"=== Thread {i} ===, words: {1}, error code: {error_code}")
-        results[i] = len(response_new_words.split(" ")) - len(prompts[i].split(" "))
+        previous_text = ""
+        start_time = time.time()
+        for chunk in response.iter_lines(decode_unicode=False, delimiter=b"\0"):
+            if chunk:
+                decoded_line = json.loads(chunk.decode("utf-8"))
+                current_text = decoded_line["text"].strip()
+                error_code = decoded_line["error_code"]
+
+                # 计算新生成的单词数量
+                # new_words = len(current_text.split(" ")) - len(previous_text.split(" "))
+                # if new_words > 0:
+                #     elapsed_time = time.time() - start_time
+                #     print(f"Generated {new_words} new word(s) in {elapsed_time:.5f} seconds.")
+                # start_time = time.time()  # 重置计时器
+
+            previous_text = current_text
+        response_new_words = previous_text
+        print(f"output: {response_new_words}")
+        # results[i] = len(response_new_words.split(" ")) - len(prompts[i].split(" "))
+        results[i] = len(response_new_words.split(" "))
 
     # use N threads to prompt the backend
     tik = time.time()
@@ -114,5 +133,6 @@ if __name__ == "__main__":
     parser.add_argument("--n-thread", type=int, default=8)
     parser.add_argument("--test-dispatch", action="store_true")
     args = parser.parse_args()
-    for i in range(20):
+    while True:
         main()
+        time.sleep(0.01)

@@ -27,7 +27,7 @@ from fastchat.serve.model_worker import (
 from fastchat.logger import logger
 from fastchat.utils import get_context_length, is_partial_stop
 
-
+first_request = True
 app = FastAPI()
 request_num = 0
 
@@ -120,9 +120,10 @@ class VLLMWorker(BaseModelWorker):
         )
         results_generator = engine.generate(context, sampling_params, request_id)
         start_time = time.time()
-        first_token_received = False
+        first_token_received = True
+        global first_request
         async for request_output in results_generator:
-            if not first_token_received:
+            if first_token_received and not first_request:
                 # 计算平均首字延迟
                 self.call_ct += 1
                 current_latency = time.time() - start_time
@@ -135,6 +136,8 @@ class VLLMWorker(BaseModelWorker):
                         f"vLLM First token latency(Avg): {self.first_token_latency} seconds, current_latency: {current_latency}, request count: {self.call_ct}"
                     )
                 first_token_received = True
+            if first_request:
+                first_request = False
             prompt = request_output.prompt
             if echo:
                 text_outputs = [
@@ -221,7 +224,7 @@ async def api_generate_stream(request: Request):
     with logger.contextualize(request_id=request_id):
         params["request_id"] = request_id
         params["request"] = request
-        logger.info(f"vllm receive: {params}")
+        # logger.info(f"vllm receive: {params}")
         generator = worker.generate_stream(params)
         background_tasks = create_background_tasks(request_id)
         return StreamingResponse(generator, background=background_tasks)
@@ -275,7 +278,7 @@ if __name__ == "__main__":
         type=lambda s: s.split(","),
         help="Optional display comma separated names",
     )
-    parser.add_argument("--limit-worker-concurrency", type=int, default=1024)
+    parser.add_argument("--limit_worker_concurrency", type=int, default=1024)
     parser.add_argument("--no-register", action="store_true")
     parser.add_argument("--num-gpus", type=int, default=1)
     parser.add_argument(
@@ -303,6 +306,12 @@ if __name__ == "__main__":
         "values will increase the KV cache size and thus improve the model's"
         "throughput. However, if the value is too high, it may cause out-of-"
         "memory (OOM) errors.",
+    )
+    parser.add_argument(
+        "--log_requests",
+        type=bool,
+        default=False,
+        help="A single GPU like 1 or multiple GPUs like 0,2",
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)

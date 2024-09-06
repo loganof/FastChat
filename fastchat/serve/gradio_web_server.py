@@ -323,7 +323,7 @@ def add_text(state, model_selector, text, prompt, request: gr.Request):
         state.skip_next = True
         return (state, state.to_gradio_chatbot(), "", None) + (no_change_btn,) * 5
     state.conv.set_system_message(prompt)
-    print(f"######{state.conv.get_system_message()}")
+    # print(f"######{state.conv.get_system_message()}")
     all_conv_text = state.conv.get_prompt()
     all_conv_text = all_conv_text[-2000:] + "\nuser: " + text
     flagged = moderation_filter(all_conv_text, [state.model_name])
@@ -386,6 +386,7 @@ def model_worker_stream_iter(
     for chunk in response.iter_lines(decode_unicode=False, delimiter=b"\0"):
         if chunk:
             data = json.loads(chunk.decode())
+            # logger.info(f"###data:{data}")
             yield data
 
 

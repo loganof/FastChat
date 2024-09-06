@@ -336,7 +336,7 @@ def make_argument_parser(parser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--max_req_total_len",
         type=int,
-        default=2048 + 1024,
+        default=2048 + 2048,
         help="the max value for req_input_len + req_output_len",
     )
     parser.add_argument(
@@ -419,6 +419,9 @@ def make_argument_parser(parser) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--token_healing_mode", action="store_true", help="code model infer mode"
+    )
+    parser.add_argument(
+        "--simple_constraint_mode", action="store_true", help="output constraint mode"
     )
 
     parser.add_argument(
@@ -543,6 +546,8 @@ if __name__ == "__main__":
     )
     parser = make_argument_parser(parser)
     args = parser.parse_args()
+    if args.num_gpus > 1:
+        args.tp = args.num_gpus
     if args.gpus:
         if len(args.gpus.split(",")) < args.num_gpus:
             raise ValueError(
