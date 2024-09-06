@@ -56,3 +56,5 @@ PEFT_SHARE_BASE_WEIGHTS=true python3 -m fastchat.serve.multi_model_worker \
 CUDA_VISIBLE_DEVICES=3 python -m vllm.entrypoints.openai.api_server --model  /home/ubuntu/depoly/models/qwen2_0.5b_3typeslotintent_sft_20240815e3 --port 12001  --gpu_memory_utilization=0.2
 #### lightllm
 CUDA_VISIBLE_DEVICES=4 python -m lightllm.server.api_server --model_dir /home/ubuntu/depoly/models/qwen2_0.5b_3typeslotintent_sft_20240815e3 --host 0.0.0.0   --port 12002 --tp 1 --max_total_token_num 60000 --batch_max_tokens 4096 --tokenizer_mode fast --nccl_port 28775
+#### test concurrency
+locust -f tests/locustfile_vllm.py -P 8088
