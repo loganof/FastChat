@@ -1,55 +1,46 @@
 """
-A model worker that executes the model based on LightLLM.
+A model worker that executes the model based on MLC_LLM.
 
-See documentations at docs/lightllm_integration.md
+See documentations at https://llm.mlc.ai/
 """
 
 import argparse
 import asyncio
 import json
 import os
-import time
-import torch
-import uvicorn
-
-from transformers import AutoConfig
-
 from typing import List
 
+import uvicorn
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
+from mlc_llm.cli.serve import EngineConfigOverride
+from mlc_llm.interface.help import HELP
+from mlc_llm.protocol.openai_api_protocol import CompletionRequest
+from mlc_llm.serve import engine, engine_utils
+from mlc_llm.serve.server import ServerContext
+from mlc_llm.support.argparse import ArgumentParser
 
 from fastchat.serve.base_model_worker import BaseModelWorker
 from fastchat.serve.model_worker import (
     logger,
     worker_id,
 )
-from fastchat.utils import get_context_length, is_partial_stop
 
-from mlc_llm.serve import engine, engine_utils
-from mlc_llm.serve.server import ServerContext
-from mlc_llm.serve.server import ServerContext
-from mlc_llm.protocol import error_protocol
-from mlc_llm.interface.help import HELP
-from mlc_llm.support.argparse import ArgumentParser
-from mlc_llm.interface.serve import serve
-from http import HTTPStatus
 app = FastAPI()
 
 
 class MLCWorker(BaseModelWorker):
     def __init__(
-        self,
-        controller_addr: str,
-        worker_addr: str,
-        worker_id: str,
-        model_path: str,
-        model_names: List[str],
-        limit_worker_concurrency: int,
-        no_register: bool,
-        conv_template: str,
-        llm_engine, 
-        context_len,
+            self,
+            controller_addr: str,
+            worker_addr: str,
+            worker_id: str,
+            model_path: str,
+            model_names: List[str],
+            limit_worker_concurrency: int,
+            no_register: bool,
+            conv_template: str,
+            # context_len,
     ):
         super().__init__(
             controller_addr,
@@ -64,31 +55,23 @@ class MLCWorker(BaseModelWorker):
         logger.info(
             f"Loading the model {self.model_names} on worker {worker_id}, worker type: LightLLM worker..."
         )
-        self.tokenizer = llm_engine
-        self.context_len = context_len
-
-        self.is_first = True
-
+        # self.context_len = context_len
         if not no_register:
             self.init_heart_beat()
 
     async def generate_stream(self, params):
-
         server_context: ServerContext = ServerContext.current()
         request_final_usage_include_extra = server_context.enable_debug
-        # request_include_debug_config = server_context.enable_debug
-        model = "qwen"
-        # if not request_include_debug_config:
-        #     request.debug_config = None
-        print(f"{params=}")
-        async_engine = server_context.get_engine(model)
-        # if async_engine is None:
-        #     return error_protocol.create_error_response(
-        #         HTTPStatus.BAD_REQUEST, message=f'The requested model "{model}" is not served.'
-        #     )
+        request_include_debug_config = server_context.enable_debug
         request_id = params.pop("request_id")
         request = params.get("request", None)
-
+        if not request_include_debug_config:
+            request.debug_config = None
+        print(f"{params=}, {self.model_names=}")
+        async_engine = server_context.get_engine(self.model_names)
+        if async_engine is None:
+            logger.error("async_engine is None!!!")
+            quit(0)
         # Streaming response.
         # We manually get the first response from generator to
         # capture potential exceptions in this scope, rather then
@@ -104,11 +87,10 @@ class MLCWorker(BaseModelWorker):
             yield "data: [DONE]\n\n"
             return
         yield f"data: {first_response.model_dump_json(by_alias=True)}\n\n"
-        
         async for response in stream_generator:
+            logger.info(f"{response=}")
             yield f"data: {response.model_dump_json(by_alias=True)}\n\n"
         yield "data: [DONE]\n\n"
-  
 
     async def generate(self, params):
         async for x in self.generate_stream(params):
@@ -132,17 +114,20 @@ def create_background_tasks(request_id):
 
     background_tasks = BackgroundTasks()
     background_tasks.add_task(release_worker_semaphore)
-    background_tasks.add_task(abort_request)
+    # background_tasks.add_task(abort_request)
     return background_tasks
 
 
 @app.post("/worker_generate_stream")
-async def api_generate_stream(request: Request):
-    params = await request.json()
+async def api_generate_stream(request: CompletionRequest):
+    params = {}
     await acquire_worker_semaphore()
     request_id = f"cmpl-{engine_utils.random_uuid()}"
     params["request_id"] = request_id
+    if request.max_tokens is None:
+        request.max_tokens = 1024
     params["request"] = request
+
     generator = worker.generate_stream(params)
     background_tasks = create_background_tasks(request_id)
     return StreamingResponse(generator, background=background_tasks)
@@ -181,95 +166,7 @@ async def api_model_details(request: Request):
     return {"context_length": worker.context_len}
 
 
-import dataclasses
-import json
-from io import StringIO
-from typing import Literal, Optional
-
-@dataclasses.dataclass
-class EngineConfigOverride:  # pylint: disable=too-many-instance-attributes
-    """Arguments for overriding engine config."""
-
-    # Overrides for EngineConfig (runtime)
-    max_num_sequence: Optional[int] = None
-    max_total_seq_length: Optional[int] = None
-    prefill_chunk_size: Optional[int] = None
-    max_history_size: Optional[int] = None
-    gpu_memory_utilization: Optional[float] = None
-    spec_draft_length: Optional[int] = None
-    prefix_cache_mode: Optional[Literal["disable", "radix"]] = None
-    prefix_cache_max_num_recycling_seqs: Optional[int] = None
-    prefill_mode: Optional[Literal["chunked", "hybrid"]] = None
-    context_window_size: Optional[int] = None
-    sliding_window_size: Optional[int] = None
-    attention_sink_size: Optional[int] = None
-    tensor_parallel_shards: Optional[int] = None
-    pipeline_parallel_stages: Optional[int] = None
-
-    def __repr__(self) -> str:
-        out = StringIO()
-        print(f"max_num_sequence={self.max_num_sequence}", file=out, end="")
-        print(f";max_total_seq_length={self.max_total_seq_length}", file=out, end="")
-        print(f";prefill_chunk_size={self.prefill_chunk_size}", file=out, end="")
-        print(f";max_history_size={self.max_history_size}", file=out, end="")
-        print(f";gpu_memory_utilization={self.gpu_memory_utilization}", file=out, end="")
-        print(f";spec_draft_length={self.spec_draft_length}", file=out, end="")
-        print(f";prefix_cache_mode={self.prefix_cache_mode}", file=out, end="")
-        print(
-            f";prefix_cache_max_num_recycling_seqs={self.prefix_cache_max_num_recycling_seqs}",
-            file=out,
-            end="",
-        )
-        print(f";prefill_mode={self.prefill_mode}", file=out, end="")
-        print(f";context_window_size={self.context_window_size}", file=out, end="")
-        print(f";sliding_window_size={self.sliding_window_size}", file=out, end="")
-        print(f";attention_sink_size={self.attention_sink_size}", file=out, end="")
-        print(f";tensor_parallel_shards={self.tensor_parallel_shards}", file=out, end="")
-        print(f";pipeline_parallel_stages={self.pipeline_parallel_stages}", file=out, end="")
-        return out.getvalue().rstrip()
-
-    @staticmethod
-    def from_str(source: str) -> "EngineConfigOverride":
-        """Parse engine config override values from a string."""
-        parser = argparse.ArgumentParser(description="Engine config override values")
-
-        parser.add_argument("--max_num_sequence", type=int, default=None)
-        parser.add_argument("--max_total_seq_length", type=int, default=None)
-        parser.add_argument("--prefill_chunk_size", type=int, default=None)
-        parser.add_argument("--max_history_size", type=int, default=None)
-        parser.add_argument("--gpu_memory_utilization", type=float, default=None)
-        parser.add_argument("--spec_draft_length", type=int, default=None)
-        parser.add_argument("--prefix_cache_mode", type=str, default="radix")
-        parser.add_argument("--prefix_cache_max_num_recycling_seqs", type=int, default=None)
-        parser.add_argument("--prefill_mode", type=str, default="hybrid")
-        parser.add_argument("--context_window_size", type=int, default=None)
-        parser.add_argument("--sliding_window_size", type=int, default=None)
-        parser.add_argument("--attention_sink_size", type=int, default=None)
-        parser.add_argument("--tensor_parallel_shards", type=int, default=None)
-        parser.add_argument("--pipeline_parallel_stages", type=int, default=None)
-        results = parser.parse_args([f"--{i}" for i in source.split(";") if i])
-        return EngineConfigOverride(
-            max_num_sequence=results.max_num_sequence,
-            max_total_seq_length=results.max_total_seq_length,
-            prefill_chunk_size=results.prefill_chunk_size,
-            max_history_size=results.max_history_size,
-            gpu_memory_utilization=results.gpu_memory_utilization,
-            spec_draft_length=results.spec_draft_length,
-            prefix_cache_mode=results.prefix_cache_mode,
-            prefix_cache_max_num_recycling_seqs=results.prefix_cache_max_num_recycling_seqs,
-            prefill_mode=results.prefill_mode,
-            context_window_size=results.context_window_size,
-            sliding_window_size=results.sliding_window_size,
-            attention_sink_size=results.attention_sink_size,
-            tensor_parallel_shards=results.tensor_parallel_shards,
-            pipeline_parallel_stages=results.pipeline_parallel_stages,
-        )
-
-
-if __name__ == "__main__":
-
-    parser = ArgumentParser("MLC LLM Serve CLI")
-
+def make_parser_mlc(parser) -> argparse.ArgumentParser:
     # parser.add_argument(
     #     "model",
     #     type=str,
@@ -339,7 +236,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--port",
         type=int,
-        default=8000,
+        default=21002,
         help="port" + ' (default: "%(default)s")',
     )
     parser.add_argument("--allow-credentials", action="store_true", help="allow credentials")
@@ -361,9 +258,17 @@ if __name__ == "__main__":
         default=["*"],
         help="allowed headers" + ' (default: "%(default)s")',
     )
-    # ----------------------
-    parser.add_argument("--model-path", type=str, default="lmsys/vicuna-7b-v1.5")
+    return parser
 
+
+if __name__ == "__main__":
+    parser = ArgumentParser("MLC LLM Serve CLI")
+
+    parser.add_argument("--model-path", type=str, default="lmsys/vicuna-7b-v1.5")
+    parser.add_argument("--worker-address", type=str, default="http://localhost:21002")
+    parser.add_argument(
+        "--controller-address", type=str, default="http://localhost:21001"
+    )
     parser.add_argument(
         "--conv-template", type=str, default=None, help="Conversation prompt template."
     )
@@ -376,6 +281,8 @@ if __name__ == "__main__":
         default="3,4",
         help="A single GPU like 1 or multiple GPUs like 0,2",
     )
+    parser = make_parser_mlc(parser)
+
     args = parser.parse_args()
     if args.gpus:
         if len(args.gpus.split(",")) < args.num_gpus:
@@ -385,7 +292,6 @@ if __name__ == "__main__":
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
     if args.model_path:
         args.model = args.model_path
-    print(f"###{args.model}")
 
     additional_models = []
     if args.additional_models is not None:
@@ -425,14 +331,12 @@ if __name__ == "__main__":
         args.controller_address,
         args.worker_address,
         worker_id,
-        args.model_dir,
+        args.model_path,
         args.model,
         args.limit_worker_concurrency,
         args.no_register,
-        async_engine,
-        args.conv_template,
+        args.conv_template
     )
-    
     with ServerContext() as server_context:
         server_context.add_model(args.model, async_engine)
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")
