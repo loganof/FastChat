@@ -17,6 +17,7 @@ from mlc_llm.cli.serve import EngineConfigOverride
 from mlc_llm.interface.help import HELP
 from mlc_llm.protocol.openai_api_protocol import CompletionRequest
 from mlc_llm.serve import engine, engine_utils
+from mlc_llm.serve.engine import AsyncMLCEngine
 from mlc_llm.serve.server import ServerContext
 from mlc_llm.support.argparse import ArgumentParser
 
@@ -25,22 +26,23 @@ from fastchat.serve.model_worker import (
     logger,
     worker_id,
 )
+from fastchat.utils import get_context_length
 
 app = FastAPI()
 
 
 class MLCWorker(BaseModelWorker):
     def __init__(
-            self,
-            controller_addr: str,
-            worker_addr: str,
-            worker_id: str,
-            model_path: str,
-            model_names: List[str],
-            limit_worker_concurrency: int,
-            no_register: bool,
-            conv_template: str,
-            # context_len,
+        self,
+        controller_addr: str,
+        worker_addr: str,
+        worker_id: str,
+        model_path: str,
+        model_names: List[str],
+        limit_worker_concurrency: int,
+        no_register: bool,
+        llm_engine: AsyncMLCEngine,
+        conv_template: str,
     ):
         super().__init__(
             controller_addr,
@@ -53,9 +55,12 @@ class MLCWorker(BaseModelWorker):
         )
 
         logger.info(
-            f"Loading the model {self.model_names} on worker {worker_id}, worker type: LightLLM worker..."
+            f"Loading the model {self.model_names} on worker {worker_id}, worker type: mlc worker..."
         )
-        # self.context_len = context_len
+        self.tokenizer = llm_engine.tokenizer
+        if hasattr(self.tokenizer, "tokenizer"):
+            self.tokenizer = llm_engine.tokenizer.tokenizer
+        self.context_len = get_context_length(llm_engine.engine_config)
         if not no_register:
             self.init_heart_beat()
 
@@ -76,21 +81,44 @@ class MLCWorker(BaseModelWorker):
         # We manually get the first response from generator to
         # capture potential exceptions in this scope, rather then
         # the StreamingResponse scope.
-        stream_generator = async_engine._handle_completion(  # pylint: disable=protected-access
-            request, request_id, request_final_usage_include_extra=request_final_usage_include_extra
+        text_outputs = ""
+        cumulative_logprob = 0.0
+        stream_generator = (
+            async_engine._handle_completion(  # pylint: disable=protected-access
+                request,
+                request_id,
+                request_final_usage_include_extra=request_final_usage_include_extra,
+            )
         )
-        first_response = await anext(  # type: ignore  # pylint: disable=undefined-variable
-            stream_generator
-        )
+        # first_response = await anext(  # type: ignore  # pylint: disable=undefined-variable
+        #     stream_generator
+        # )
 
-        if isinstance(first_response, StopAsyncIteration):
-            yield "data: [DONE]\n\n"
-            return
-        yield f"data: {first_response.model_dump_json(by_alias=True)}\n\n"
+        # if isinstance(first_response, StopAsyncIteration):
+        #     yield "[DONE]\n\n"
+        #     return
+        # yield f"{first_response.model_dump_json(by_alias=True)}\n\n"
         async for response in stream_generator:
-            logger.info(f"{response=}")
-            yield f"data: {response.model_dump_json(by_alias=True)}\n\n"
-        yield "data: [DONE]\n\n"
+            if len(response.choices) < 1:
+                continue
+            text_outputs += response.choices[0].text
+            logprob = response.choices[0].logprobs
+            if logprob is not None:
+                cumulative_logprob += logprob
+            # finish_reason = response.choices[0].finish_reason
+            ret = {
+                "text": text_outputs,
+                "error_code": 0,
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 1,
+                },
+                "cumulative_logprob": cumulative_logprob,
+            }
+            # print(f"{ret=}")
+            yield (json.dumps({**ret, **{"finish_reason": None}}) + "\0").encode()
+        # yield "data: [DONE]\n\n"
 
     async def generate(self, params):
         async for x in self.generate_stream(params):
@@ -119,14 +147,26 @@ def create_background_tasks(request_id):
 
 
 @app.post("/worker_generate_stream")
-async def api_generate_stream(request: CompletionRequest):
+async def api_generate_stream(request: Request):
+    request_js = await request.json()
+    print(f"{request_js=}")
+    request_mlc = CompletionRequest(
+        model=request_js.get("model"),
+        prompt=request_js.get("prompt"),
+        temperature=request_js.get("temperature"),
+        max_tokens=request_js.get("max_new_tokens"),
+        presence_penalty=request_js.get("frequency_penalty"),
+        frequency_penalty=request_js.get("frequency_penalty"),
+        user=request_js.get("user"),
+        stop=request_js.get("stop"),
+    )
     params = {}
     await acquire_worker_semaphore()
     request_id = f"cmpl-{engine_utils.random_uuid()}"
     params["request_id"] = request_id
-    if request.max_tokens is None:
-        request.max_tokens = 1024
-    params["request"] = request
+    # if request.max_tokens is None:
+    #     request.max_tokens = 1024
+    params["request"] = request_mlc
 
     generator = worker.generate_stream(params)
     background_tasks = create_background_tasks(request_id)
@@ -153,7 +193,15 @@ async def api_get_status(request: Request):
 @app.post("/count_token")
 async def api_count_token(request: Request):
     params = await request.json()
-    return worker.count_token(params)
+    prompt = params["prompt"]
+    input_ids = worker.tokenizer.encode(prompt)
+    input_echo_len = len(input_ids)
+    ret = {
+        "count": input_echo_len,
+        "error_code": 0,
+    }
+    return ret
+    # return worker.count_token(params)
 
 
 @app.post("/worker_get_conv_template")
@@ -226,7 +274,9 @@ def make_parser_mlc(parser) -> argparse.ArgumentParser:
         default="",
         help=HELP["overrides_serve"],
     )
-    parser.add_argument("--enable-tracing", action="store_true", help=HELP["enable_tracing_serve"])
+    parser.add_argument(
+        "--enable-tracing", action="store_true", help=HELP["enable_tracing_serve"]
+    )
     parser.add_argument(
         "--host",
         type=str,
@@ -239,7 +289,9 @@ def make_parser_mlc(parser) -> argparse.ArgumentParser:
         default=21002,
         help="port" + ' (default: "%(default)s")',
     )
-    parser.add_argument("--allow-credentials", action="store_true", help="allow credentials")
+    parser.add_argument(
+        "--allow-credentials", action="store_true", help="allow credentials"
+    )
     parser.add_argument(
         "--allow-origins",
         type=json.loads,
@@ -335,7 +387,8 @@ if __name__ == "__main__":
         args.model,
         args.limit_worker_concurrency,
         args.no_register,
-        args.conv_template
+        async_engine,
+        args.conv_template,
     )
     with ServerContext() as server_context:
         server_context.add_model(args.model, async_engine)
